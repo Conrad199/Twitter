@@ -100,11 +100,7 @@ def to_target(document: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# --- Analyse faite par le serveur MongoDB (rien n'est téléchargé en trop) -----
-
-
 def server_leaf_filled(value: Any) -> dict[str, Any]:
-    """Expression MongoDB : vrai si la valeur est une donnée remplie (texte, nombre...)."""
     return {
         "$switch": {
             "branches": [
@@ -125,7 +121,6 @@ def server_leaf_filled(value: Any) -> dict[str, Any]:
 
 
 def server_any_value(container: Any, name: str, test: Callable[[Any], Any]) -> dict[str, Any]:
-    """Expression MongoDB : vrai si une valeur de l'objet `container` passe `test`."""
     return {
         "$anyElementTrue": {
             "$map": {
@@ -142,15 +137,6 @@ def server_if_type(value: Any, type_name: str, then: Any) -> dict[str, Any]:
 
 
 def server_socials_filled() -> dict[str, Any]:
-    """Expression MongoDB : socialAccounts contient SÛREMENT une donnée remplie.
-
-    Structure rencontrée dans la base :
-        {"facebook": [{"link": ..., "name": ...}], "instagram": "https://...",
-         "youtube": [{...}], "youtubeStatus": "TROUVE"}
-    Regarde jusqu'à 3 niveaux (réseau -> liste -> objet). Dans le doute, le
-    document est gardé : Python refait ensuite le test exact avec is_social_filled.
-    """
-
     def leaf(value: Any) -> dict[str, Any]:
         return server_leaf_filled(value)
 
@@ -195,11 +181,6 @@ def server_socials_filled() -> dict[str, Any]:
 
 
 def scan_on_server(only_name: str | None = None) -> tuple[str, list[dict[str, Any]]]:
-    """Bilan + entreprises à rechercher, avec le tri fait par le serveur MongoDB.
-
-    Seuls les documents possiblement vides sont envoyés à l'ordinateur ; Python
-    vérifie ensuite chacun avec le test exact (needs_search).
-    """
     projection = {"companyName": 1, "socialAccounts": 1}
     with mongo_client() as client:
         database = client.get_default_database()
@@ -226,11 +207,7 @@ def scan_on_server(only_name: str | None = None) -> tuple[str, list[dict[str, An
     return stats, [to_target(document) for document in target_docs]
 
 
-# --- Analyse faite sur l'ordinateur (repli : télécharge toute la collection) ---
-
-
 def print_scan_progress(read: int, expected: int, started: float) -> None:
-    """Affiche l'avancement de la lecture et le temps restant estimé."""
     elapsed = time.time() - started
     percent = 100 * read / expected if expected else 0
     remaining = elapsed * (expected - read) / read if 0 < read < expected else 0
@@ -241,7 +218,6 @@ def print_scan_progress(read: int, expected: int, started: float) -> None:
 
 
 def scan_locally(only_name: str | None = None) -> tuple[str, list[dict[str, Any]]]:
-    """Lit toute la collection et fait le tri sur l'ordinateur."""
     total = filled = absent = 0
     targets: list[dict[str, Any]] = []
     projection = {"companyName": 1, "socialAccounts": 1}
@@ -273,7 +249,6 @@ def scan_locally(only_name: str | None = None) -> tuple[str, list[dict[str, Any]
 
 
 def run_with_heartbeat(action: Callable[[], Any], message: str, every_s: int = 15) -> Any:
-    """Exécute `action` en affichant un signe de vie pendant l'attente."""
     done = threading.Event()
 
     def beat() -> None:
@@ -289,12 +264,6 @@ def run_with_heartbeat(action: Callable[[], Any], message: str, every_s: int = 1
 
 
 def scan_database(only_name: str | None = None) -> tuple[str, list[dict[str, Any]]]:
-    """Bilan + entreprises à rechercher (socialAccounts PRÉSENT mais vide).
-
-    Essaie d'abord l'analyse sur le serveur ; si MongoDB refuse la requête
-    (version trop ancienne...), on lit toute la collection sur l'ordinateur.
-    Si only_name est donné (mode test), seule cette entreprise est une cible.
-    """
     try:
         print("Analyse faite directement sur le serveur MongoDB...", flush=True)
         return run_with_heartbeat(
@@ -306,23 +275,22 @@ def scan_database(only_name: str | None = None) -> tuple[str, list[dict[str, Any
 
 
 def needs_search(document: dict[str, Any]) -> bool:
-    """Vrai si le champ socialAccounts est présent mais vide."""
     return "socialAccounts" in document and not is_social_filled(
         document["socialAccounts"]
     )
 
 
 def load_company(doc_id: Any, company_name: str) -> dict[str, Any]:
-    """Document complet de l'entreprise (sert à comparer les autres données)."""
     with mongo_collection() as collection:
         return collection.find_one({"_id": doc_id}) or {"companyName": company_name}
 
 
 def save_to_mongo(doc_id: Any, accounts: list[dict[str, Any]]) -> int:
-    """Enregistre les comptes X trouvés dans MongoDB (format socialAccounts.twitter)."""
+    """Enregistre les comptes X trouvés dans MongoDB sous forme de tableau (ex: 0, 1, 2...)."""
     with mongo_collection() as collection:
         existing = collection.find_one({"_id": doc_id}) or {}
         social_accounts = existing.get("socialAccounts") or {}
+        
         social_accounts["twitter"] = [
             {
                 "link": account["link"],
@@ -331,7 +299,7 @@ def save_to_mongo(doc_id: Any, accounts: list[dict[str, Any]]) -> int:
             }
             for account in accounts[:MAX_LINKS_PER_COMPANY]
         ]
-        # nombre de réseaux sociaux ayant au moins un compte
+        
         num_social_accounts = sum(1 for links in social_accounts.values() if links)
         result = collection.update_one(
             {"_id": doc_id},
@@ -346,12 +314,11 @@ def save_to_mongo(doc_id: Any, accounts: list[dict[str, Any]]) -> int:
 
 
 # =============================================================================
-# Progression (reprise après une coupure)
+# Progression et Cache
 # =============================================================================
 
 
 def load_processed_ids() -> set[str]:
-    """Identifiants des entreprises déjà traitées lors des lancements précédents."""
     processed: set[str] = set()
     for path in (PROGRESS_FILE, LEGACY_PROGRESS_FILE):
         try:
@@ -362,27 +329,19 @@ def load_processed_ids() -> set[str]:
 
 
 def mark_processed(doc_id: Any) -> None:
-    """Mémorise qu'une entreprise est traitée (avec ou sans lien trouvé)."""
     processed = load_processed_ids()
     processed.add(str(doc_id))
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     PROGRESS_FILE.write_text(json.dumps(sorted(processed)), encoding="utf-8")
 
 
-# =============================================================================
-# Cache de la lecture de la base
-# =============================================================================
-
-
 def cache_key() -> str:
-    """Identifie la base + collection du cache (le mot de passe n'est pas stocké)."""
     return hashlib.sha1(f"{MONGO_URI}|{MONGO_COLLECTION}".encode()).hexdigest()
 
 
 def save_scan_cache(stats: str, targets: list[dict[str, Any]]) -> None:
-    """Garde la liste des entreprises lues pour les prochains lancements."""
     if not all(isinstance(target["_id"], ObjectId) for target in targets):
-        return  # identifiants non standard : pas de cache
+        return
     data = {
         "key": cache_key(),
         "stats": stats,
@@ -394,7 +353,6 @@ def save_scan_cache(stats: str, targets: list[dict[str, Any]]) -> None:
 
 
 def load_scan_cache() -> tuple[str, list[dict[str, Any]]] | None:
-    """Liste mise en cache pour cette base, ou None s'il n'y en a pas."""
     for path in (SCAN_CACHE_FILE, LEGACY_SCAN_CACHE_FILE):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))

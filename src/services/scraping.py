@@ -50,18 +50,15 @@ class NameTester(QMainWindow):
         super().__init__()
         self.targets = targets
         self.track_progress = track_progress
-        self.total = len(targets)  # entreprises de ce lancement
-        # Compteur affiché : il continue d'un lancement à l'autre (ex. 58/464767)
+        self.total = len(targets)
         self.already_done = already_done
         self.grand_total = already_done + self.total
 
-        # État global
         self.running = False
         self.login_check_pending = False
         self.target_index = 0
-        self.results: list[dict[str, Any]] = []  # entreprises avec au moins un lien
+        self.results: list[dict[str, Any]] = []
 
-        # État de l'entreprise en cours
         self.doc_id: Any = None
         self.company_name = ""
         self.company_doc: dict[str, Any] = {}
@@ -78,8 +75,6 @@ class NameTester(QMainWindow):
         self._build_ui()
         self._setup_browser()
         self._start_login_polling()
-
-    # --- Construction ------------------------------------------------------
 
     def _build_ui(self) -> None:
         self.status_label = QLabel("Connecte-toi à X la première fois.")
@@ -127,8 +122,6 @@ class NameTester(QMainWindow):
         self.login_timer.start()
         QTimer.singleShot(1200, self.check_login)
 
-    # --- Journal -----------------------------------------------------------
-
     @property
     def progress(self) -> str:
         return f"{self.already_done + self.target_index + 1}/{self.grand_total}"
@@ -136,8 +129,6 @@ class NameTester(QMainWindow):
     def log_message(self, message: str) -> None:
         self.log.append(message)
         self.status_label.setText(message)
-
-    # --- Connexion à X -----------------------------------------------------
 
     def check_login(self) -> None:
         if self.running or self.login_check_pending:
@@ -155,8 +146,6 @@ class NameTester(QMainWindow):
         self.login_timer.stop()
         self.start_batch()
 
-    # --- Boucle sur toutes les entreprises ---------------------------------
-
     def start_batch(self) -> None:
         self.running = True
         self.target_index = 0
@@ -171,7 +160,7 @@ class NameTester(QMainWindow):
 
     def show_final_summary(self) -> None:
         self.running = False
-        self.log.document().setMaximumBlockCount(0)  # affichage complet, sans limite
+        self.log.document().setMaximumBlockCount(0)
         links_total = sum(len(item["accounts"]) for item in self.results)
         self.log_message(
             f"Résultat : {len(self.results)}/{self.total} "
@@ -189,13 +178,11 @@ class NameTester(QMainWindow):
                 )
 
     def finish_company(self) -> None:
-        """Mémorise l'entreprise comme traitée puis passe à la suivante."""
         if self.track_progress:
             mark_processed(self.doc_id)
         self.next_company()
 
     def abort(self, reason: str) -> None:
-        """Arrête proprement ; au prochain lancement, on reprend à l'entreprise en cours."""
         self.page_load_timer.stop()
         self.show_final_summary()
         self.log_message(
@@ -209,8 +196,6 @@ class NameTester(QMainWindow):
     def on_load_timeout(self) -> None:
         if self.running:
             self.abort("Connexion trop longue.")
-
-    # --- Recherche (noms) --------------------------------------------------
 
     def start_company(self) -> None:
         target = self.targets[self.target_index]
@@ -275,9 +260,9 @@ class NameTester(QMainWindow):
         if not self.running:
             return
         if not isinstance(result, dict):
-            result = {}  # lecture ratée : traité comme « pas encore de résultat »
+            result = {}
         if "/search" not in str(result.get("href") or ""):
-            result = {}  # page de recherche pas encore affichée : on réessaie
+            result = {}
 
         users = result.get("users")
         if not users:
@@ -296,7 +281,6 @@ class NameTester(QMainWindow):
         self.next_tab()
 
     def register_found_users(self, users: list[dict[str, Any]]) -> int:
-        """Ajoute les comptes inconnus à self.found ; retourne le nombre ajouté."""
         new_count = 0
         for user in users:
             username = user.get("username") or ""
@@ -311,10 +295,7 @@ class NameTester(QMainWindow):
             new_count += 1
         return new_count
 
-    # --- Vérification des autres données (page profil) ---------------------
-
     def start_profiles(self) -> None:
-        """Garde seulement les comptes dont le NOM ressemble à au moins NAME_THRESHOLD %."""
         self.candidates = []
         for user in self.found.values():
             user["name_score"] = name_similarity(
@@ -350,7 +331,7 @@ class NameTester(QMainWindow):
             result = {}
         user = self.candidates[self.profile_index]
         if user["username"].casefold() not in str(result.get("href") or "").casefold():
-            result = {}  # le profil attendu n'est pas encore affiché : on réessaie
+            result = {}
 
         if not result.get("ready"):
             self.profile_retry += 1
@@ -374,13 +355,7 @@ class NameTester(QMainWindow):
         else:
             self.show_results()
 
-    # --- Résultat ----------------------------------------------------------
-
     def build_accounts(self) -> list[dict[str, Any]]:
-        """Comptes retenus, du plus au moins ressemblant aux données de l'entreprise.
-
-        Égalité : le nom le plus proche passe devant.
-        """
         accounts: list[dict[str, Any]] = []
         for user in self.candidates:
             score, matched, total = data_similarity(
@@ -390,7 +365,7 @@ class NameTester(QMainWindow):
                 {
                     "link": X_PROFILE_URL.format(username=user["username"]),
                     "name": user["username"],
-                    "score": score,  # ressemblance aux DONNÉES de l'entreprise
+                    "score": score,
                     "name_score": user["name_score"],
                     "matched": matched,
                     "total": total,
@@ -414,10 +389,6 @@ class NameTester(QMainWindow):
             self.log.append(f"    pourcentage : {account['score']}%")
 
     def save_accounts(self, accounts: list[dict[str, Any]]) -> bool:
-        """Enregistre dans MongoDB ; retourne True si le document a été mis à jour.
-
-        Lève l'erreur de connexion MongoDB (gérée par show_results).
-        """
         matched_docs = with_retry(save_to_mongo, self.doc_id, accounts)
         if matched_docs:
             self.log.append(f"MongoDB : {len(accounts)} lien(s) enregistré(s).")
